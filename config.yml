@@ -1,0 +1,86 @@
+# Model parameters
+arch: resnet18 #vit_small #resnet18 vit_small_scale efficientnetv2
+patch_size: 4 #16
+out_dim: 256 #2000 #65536 512
+norm_last_layer: false #true
+momentum_teacher: 0.996 #0.996
+use_bn_in_head: false
+
+emb_dim: 64 #64 #backbone output dim
+prototype_num: 100 # 100
+nlayers: 2 #3
+hidden_dim: 128 #512
+bottleneck_dim: 64 #128
+resize: 32 #112
+lambda_end: 1
+lambda_converge: 100
+
+# Temperature teacher parameters
+warmup_teacher_temp: 0.04 #0.04
+teacher_temp: 0.04 #0.04
+warmup_teacher_temp_epochs: 30 #30
+student_tmp: 0.1
+
+emb_warmup_teacher_temp: 0.04 #0.04
+emb_teacher_temp: 0.04 #0.04
+emb_warmup_teacher_temp_epochs: 30 #30
+prototype_student_temp: 0.1 #0.1
+final_emb_student_temp: 0.1 #0.1
+
+# Training/Optimization parameters
+# use_fp16: false #true
+precision: bf16 #fp16 bf16
+weight_decay: 0.04
+weight_decay_end: 0.4 #0.4
+clip_grad: 3.0 #3.0
+batch_size_per_gpu: 128 #200
+epochs: 200 # 100
+freeze_last_layer: 1 #1
+lr: 0.0005 # 0.0005
+warmup_epochs: 30 # 10
+min_lr: 1e-6 # 1e-6
+optimizer: adamw
+drop_rate: 0.0
+drop_path_rate: 0.0 #0.1
+drop_block_rate: 0.0
+
+# Multi-crop parameters
+global_crops_scale: [0.7, 1.0] #[0.4, 1.0] [0.8, 1.0] [0.7, 1.0]
+local_crops_number: 8
+local_crops_scale: [0.2, 0.5]  #[0.05, 0.4] [0.4, 0.8] [0.2, 0.5]
+transform: None #None weak
+
+# Misc
+# data_path: /workspace/casia/train
+output_dir: /workspace/angular_dino/outputs/test/fashionmnist/trials/arcface-m0.5-wowarmup/trial1/fmnist_class5_resnet18_ptnum100_ep200_bs128_lambda1.0_arcface-m0.5-wowarmup-num10_useweight_embdim64_smallhead_emb64_lr0.0005-weighted-sampler_test
+
+saveckp_freq: 10 #20
+seed: 0
+num_workers: 10
+dist_url: env://
+local_rank: 0
+dataset:  PUFashionMNIST #PUMNIST #PUCIFAR10 #PUSVHN #PUFashionMNIST
+normal_class: [5]
+unseen_anomaly_class: [0]
+
+# Arcface
+margin:  0.20
+margin_type: student #student teacher tea-stu
+pt_num: 10 #10
+use_weight: true #true
+arcface_warmup: 0 #False
+
+
+#ClearML: 
+use_clearml: false
+project_name: "Getting Started miyakoshi"
+task_name: "stuxmet4 gpu0 PUFashionMNIST normalclass5 resnet18 ptnum100 ep200 bs128 lambda1.0-w100 arcface0.3-w50-100 useweight smallhead embdim64 lr0.0005 weighted sampler test"
+
+#CUDA_VISIBLE_DEVICES
+gpu_num: 0 #[0,1,2]
+
+#PORT
+port: 29500
+
+#description
+description: " "

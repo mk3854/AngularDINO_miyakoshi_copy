@@ -1,0 +1,69 @@
+arcface_warmup: 0
+arch: resnet18
+batch_size_per_gpu: 128
+bottleneck_dim: 64
+clip_grad: 3.0
+dataset: PUCIFAR10
+description: ''
+dist_url: env://
+drop_block_rate: 0.0
+drop_path_rate: 0.0
+drop_rate: 0.0
+emb_dim: 64
+emb_teacher_temp: 0.04
+emb_warmup_teacher_temp: 0.04
+emb_warmup_teacher_temp_epochs: 30
+epochs: 200
+final_emb_student_temp: 0.1
+freeze_last_layer: 1
+global_crops_scale:
+- 0.7
+- 1.0
+gpu_num: 2
+hidden_dim: 128
+lambda_converge: 100
+lambda_end: 1
+local_crops_number: 8
+local_crops_scale:
+- 0.2
+- 0.5
+local_rank: 0
+lr: 0.0005
+margin: 0.5
+margin_type: tea-stu
+min_lr: 1e-6
+momentum_teacher: 0.996
+nlayers: 2
+norm_last_layer: false
+normal_class:
+- 2
+num_workers: 10
+optimizer: adamw
+out_dim: 256
+output_dir: /workspace/angular_dino/outputs/test/cifar10/trials/tea-stu-arcface-m0.5-step50-woweight/trial5/cifar10_class2_resnet18_ptnum100_ep200_bs128_lambda1.0-warmup100_tea-stu-arcface-m0.5-step50-num10_woweight_smallhead_emb64_lr0.0005-weighted-sampler_test
+patch_size: 4
+port: 29502
+precision: bf16
+project_name: Getting Started miyakoshi
+prototype_num: 100
+prototype_student_temp: 0.1
+pt_num: 10
+resize: 32
+saveckp_freq: 10
+seed: 0
+student_tmp: 0.1
+task_name: tea-stu-arcface-trial5 step50 pkh3506a gpu0 PUCIFAR10 normalclass2 resnet18
+  ptnum100 ep200 bs128 lambda1.0 arcface0.5 woweight smallhead embdim64 lr0.0005 weighted
+  sampler test
+teacher_temp: 0.04
+transform: None
+unseen_anomaly_class:
+- 0
+use_bn_in_head: false
+use_clearml: false
+use_weight: false
+warmup_epochs: 30
+warmup_teacher_temp: 0.04
+warmup_teacher_temp_epochs: 30
+weight_decay: 0.04
+weight_decay_end: 0.4

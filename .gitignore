@@ -1,0 +1,12 @@
+/output/
+**/__pycache__/**
+**/__pycache__/
+/__pycache__/
+/images/
+/results/
+/angular_dino/images/
+/angular_dino/outputs/**/images/
+/angular_dino/outputs/**/checkpoints/
+/angular_dino/outputs/**
+/checkpoints/
+/datasets/
