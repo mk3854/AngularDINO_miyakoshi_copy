@@ -1,3 +1,17 @@
+"""
+angular_dino_train.py
+
+DINO（自己教師あり学習）を用いた異常検知の学習スクリプト。
+設定ファイル（config.yml）を読み込み、データセット準備、モデル構築、学習ループ、結果保存までを一括で実行します。
+
+主な流れ：
+1. 引数・設定ファイルの読み込み
+2. データセット・データ拡張の準備
+3. モデル（ResNet/VisionTransformer等）の構築
+4. 学習ループの実行
+5. ログ・モデルの保存
+"""
+
 import argparse
 import os
 import sys
@@ -9,6 +23,10 @@ from pathlib import Path
 import yaml
 import shutil
 from collections import Counter
+import warnings
+warnings.filterwarnings('ignore', message='.*torch.cuda.amp.autocast.*')
+warnings.filterwarnings('ignore', message='.*torch.nn.utils.weight_norm.*')
+warnings.filterwarnings('ignore', message='.*torch.cuda.amp.GradScaler.*')
 
 import numpy as np
 from PIL import Image
@@ -30,20 +48,30 @@ import utils
 import vision_transformer as vits
 from vision_transformer import DINOHead, VisionTransformer
 
-from angular_dino.angular_dino.my_utils import plot_embed, DINOLoss, converge_cosine_scheduler, \
-    myResNet, my_train_one_epoch, ReturnEmbWrapper, backbone_emb_Loss, \
-    DataAugmentationDINOMNIST, DataAugmentationDINOCIFAR10, DataAugmentationDINOFashionMNIST, DataAugmentationDINOSVHN, \
-    Weak_DataAugmentationDINOCIFAR10, Smallscale_DataAugmentationDINOSVHN
+from models.model_utils import myResNet, ReturnEmbWrapper
+from models.losses import DINOLoss, PrototypeLoss
+from augmentations import DataAugmentationDINOMNIST, DataAugmentationDINOCIFAR10, DataAugmentationDINOFashionMNIST, DataAugmentationDINOSVHN, Weak_DataAugmentationDINOCIFAR10, Smallscale_DataAugmentationDINOSVHN
+from train_utils import my_train_one_epoch, validation, converge_cosine_scheduler
+from eval_utils import plot_embed, test_anomaly_detection, get_prototype_vec_ids_from_loader, calc_y_score
+from utils_extra import split, print_f
 if "../" not in sys.path:
     sys.path.append("../")
 from dataloaders import load
 
 def get_args_parser():
+    """
+    コマンドライン引数パーサを作成
+    --config: 設定ファイルのパス
+    """
     parser = argparse.ArgumentParser('DINO', add_help=False)
     parser.add_argument('--config', type=str, help='Path to the config file.')
     return parser
 
 def train_dino(args):
+    """
+    DINOによる異常検知モデルの学習メイン関数。
+    設定に従いデータセット・モデル・損失関数・最適化手法を構築し、学習ループを回す。
+    """
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(0)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -60,16 +88,16 @@ def train_dino(args):
             #     write_log(args.log_file, logger)
         else:
             logger=None 
-            print("not clearml", args.gpu)
+            print("clarml not use")
     else:
         logger=None 
-        print("not clearml", args.gpu)
+        print("clarml not use")
 
     torchvision_archs = sorted(name for name in torchvision_models.__dict__
         if name.islower() and not name.startswith("__")
         and callable(torchvision_models.__dict__[name]))
     
-    # ============ preparing dataset ... ============
+    # ============ データセットとデータ拡張の準備 ============
     if "MNIST" in args.dataset:
         aug = DataAugmentationDINOMNIST
         ch = 1
@@ -89,6 +117,10 @@ def train_dino(args):
         else:
             aug = DataAugmentationDINOSVHN
         ch = 3
+    else:
+        raise NameError("Invalid dataset name")
+
+    # データ拡張インスタンス生成
     transform = aug(
         args.global_crops_scale,
         args.local_crops_scale,
@@ -96,65 +128,75 @@ def train_dino(args):
         # resize=args.resize
     )
 
+    # データセットのロード
     if args.dataset == "MNIST":
         dataset = datasets.MNIST(
                     root="../datasets", download=False, train=True, transform=transform
                 )
         print(f"dataset loaded MNIST")
-    #PU dataset
-    #datasetはtrainのpositive+unlabeled
-    #pos_train_subsetはtrainのうちのpositive
-    #unl_normalize_subsetはtrainのunlabeledを,dino_transformではなく単にnormalizeしたもの. プロトタイプの推定に用いる.
-    #pos_normalize_subsetはtrainのpositiveを,dino_transformではなく単にnormalizeしたもの. プロトタイプの推定に用いる.
-    #val_subsetは検証用データセット
     elif "PU" in args.dataset:
+        # PU（Positive-Unlabeled）データセットのロード
+        # dataset: 訓練用データローダーのためのデータセット
+        # pos_train_subset: *訓練データ*の異常サブセット
+        # unl_normalize_subset: 訓練用のラベル無しデータの正規化されたサブセット
+        # pos_normalize_subset: 訓練用の異常データの正規化されたサブセット
+        # val_subset: 検証用データのサブセット
         dataset, pos_train_subset, unl_normalize_subset, pos_normalize_subset, val_subset = load(
-        name=args.dataset.replace("PU", ""),
-        batch_size=False,
-        normal_class= args.normal_class, #[1],
-        unseen_anomaly= args.unseen_anomaly_class, #[0],
-        labeled_anomaly_class=False, 
-        n_train = 4500,
-        n_valid = 500,
-        # n_test = 2000,
-        n_unlabeled_normal = 4500, #4500
-        n_unlabeled_anomaly = 250, #250
-        n_labeled_anomaly = 250, #250
-        return_pu_pos_tra_valtrans_val_subset = True, 
-        transform = transform,
-        seed=0,
-        return_id=True, #False: 1->0, 0,2~9->1, True: 0->0, ... 9->9, only use visualise result
+            name=args.dataset.replace("PU", ""),
+            normal_class= args.normal_class,
+            unseen_anomaly= args.unseen_anomaly_class,
+            labeled_anomaly_class=False, 
+            n_unlabeled_normal = 4500,
+            n_unlabeled_anomaly = 250,
+            n_labeled_anomaly = 250,
+            train_ratio=0.9, # train=4500, val=500
+            return_type="train",
+            transform = transform,
+            seed=0,
+            return_id=True,
         )
 
         test_dataset = load(
-        name=args.dataset.replace("PU", ""), batch_size=128, normal_class= args.normal_class, unseen_anomaly= args.unseen_anomaly_class, labeled_anomaly_class=False, 
-        # n_train = 4500, n_valid = 500, 
-        n_test = 2000,
-        # n_unlabeled_normal = 4500, n_unlabeled_anomaly = 250, n_labeled_anomaly = 250,
-        return_test_subset=True, 
-        transform = None, seed=0,
-        return_id=False, #False: 1->0, 0,2~9->1, True: 0->0, ... 9->9, only use visualise result
+            name=args.dataset.replace("PU", ""), normal_class= args.normal_class, unseen_anomaly= args.unseen_anomaly_class, labeled_anomaly_class=False, 
+            n_test = 2000,
+            return_type="test", 
+            transform = None, seed=0,
+            return_id=False,
         )
         print(f"dataset loaded {args.dataset}")
+    else:
+        raise NameError("Invalid dataset name")
 
-    else: raise NameError("Invalid dataset name")
+    # クラス不均衡を補正するための重みを計算
+    ## データセット内のラベル付き異常サンプル数とラベルなしサンプル数を計算
+    class_counts = {
+        "unlabeled": len(dataset) - len(pos_train_subset),  # ラベルなしサンプル数
+        "positive": len(pos_train_subset)  # ラベル付き異常サンプル数
+    }
+    print(f"Dataset statistics - Unlabeled samples: {class_counts['unlabeled']}, Positive samples: {class_counts['positive']}")
 
-    unl_pos = {"unl":len(dataset)-len(pos_train_subset), "pos":len(pos_train_subset)} #訓練用データセットにおけるunlabeled, positiveそれぞれの数
-    print(f"dataset unl_num:{unl_pos['unl']}, pos_num:{unl_pos['pos']}")
+    ## 各クラスの重みは、(全サンプル数)/(2*クラスサンプル数)で計算
+    unl_pos_weight = {
+        "unl": (class_counts["unlabeled"] + class_counts["positive"]) / (2 * class_counts["unlabeled"]),
+        "pos": (class_counts["unlabeled"] + class_counts["positive"]) / (2 * class_counts["positive"])
+    }
+    print(f"Class weights for balanced sampling: {unl_pos_weight}")
 
-    # unl_pos_weight={"unl":unl_pos["pos"]/(unl_pos["unl"]+unl_pos["pos"]), 
-    #                 "pos":unl_pos["unl"]/(unl_pos["unl"]+unl_pos["pos"])} #({1/a} / {1/a+1/b} = b/a+b)
-    unl_pos_weight={"unl":(unl_pos["unl"]+unl_pos["pos"])/(2*unl_pos["unl"]), 
-                    "pos":(unl_pos["unl"]+unl_pos["pos"])/(2*unl_pos["pos"])} #unlとposのバランスをとる係数. aはunl, bはposの数に対応. (a+b)/2a << (a+b)/2b
-    print(f"unl_pos_weight: {unl_pos_weight}") #この重みは, samplerとlossの計算に使用され, unlとposの数の不均衡に対処するために用いられる.
-    sample_weight = [list(unl_pos_weight.values())[i[1][0].item()] for i in dataset] #data_loaderは上記の理由から, positive sampleを重複を許したくさんサンプリングする. 
-    sampler = WeightedRandomSampler(weights=sample_weight, num_samples=len(dataset), replacement=True)
-        
-    # sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+    ## 各サンプルに重みを割り当て
+    ## datasetはラベルなしデータの後ろに異常データが連結している形になっているため、
+    ## sample_weightsは[unl_weight,..., unl_weight, pos_weight, ...]のようになる
+    sample_weights = [list(unl_pos_weight.values())[sample[1][0].item()] for sample in dataset]
+    
+    ## positive sampleを重複を許してたくさんサンプリングするSamplerを定義
+    weighted_sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(dataset),
+        replacement=True
+    )
+    
     data_loader = torch.utils.data.DataLoader(
         dataset,
-        sampler=sampler,
-        # shuffle=True,
+        sampler=weighted_sampler,
         batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
         pin_memory=True,
@@ -162,9 +204,13 @@ def train_dino(args):
     )
     print(f"Data loaded: there are {len(dataset)} images.")
 
-    # ============ building student and teacher networks ... ============
-
-    class Normalize_Module(nn.Module): #backboneの最後に取り付ける, normalizeのためのモジュール
+    # ============ モデル構築 ============
+    # 学習するネットワーク（student, teacher）とプロトタイプベクトルの定義
+    # ResNet/VisionTransformer/その他アーキテクチャに対応
+    class Normalize_Module(nn.Module):
+        """
+        特徴ベクトルをL2ノルムで正規化するためのモジュール
+        """
         def __init__(self, p=2, dim=1):
             super(Normalize_Module, self).__init__()
             self.p = p
@@ -172,7 +218,7 @@ def train_dino(args):
         def forward(self, x):
             return torch.nn.functional.normalize(x, p=self.p, dim=self.dim)
 
-    # student = torchvision_models.__dict__["resnet18"]()
+    # --- モデル本体の構築 ---
     if args.arch == "resnet18":
         embed_dim = args.emb_dim
         student = myResNet(BasicBlock, [2,2,2,2], num_classes=embed_dim, normalize=True)
@@ -220,6 +266,7 @@ def train_dino(args):
             Normalize_Module(p=2, dim=1)
         )
     elif "vit_small_scale":
+        # VisionTransformer（ViT）小型スケール
         student = VisionTransformer(img_size=[32],
             patch_size=args.patch_size,
             in_chans=3,
@@ -248,8 +295,8 @@ def train_dino(args):
             )
         embed_dim = student.embed_dim
         print("custom vit build")
-
     elif "vit" in args.arch:
+        # VisionTransformer（ViT）
         student = vits.__dict__[args.arch](
                 patch_size=args.patch_size,
                 drop_path_rate=args.drop_path_rate,  # stochastic depth
@@ -259,28 +306,30 @@ def train_dino(args):
         embed_dim = student.embed_dim
     else:
         raise NameError(f"invalid args.arch {args.arch}")
-        
+    
     print(f"model arch: {args.arch}")
 
-    ### Prototype vector
-    prototype_num = args.prototype_num
+    # --- プロトタイプベクトルの定義 ---
+    prototype_num = args.prototype_num # プロトタイプの数
+    # student側のプロトタイプベクトルの初期化
     student_prototype_weight = nn.utils.weight_norm(nn.Linear(embed_dim, prototype_num, bias=False)).cuda()
     student_prototype_weight.weight_g.data.fill_(1)
     student_prototype_weight.weight_g.requires_grad = False
     student_prototype_weight = nn.parallel.DistributedDataParallel(student_prototype_weight, device_ids=[args.gpu], broadcast_buffers=False)
 
+    # teacher側のプロトタイプベクトルの初期化
     teacher_prototype_weight = nn.utils.weight_norm(nn.Linear(embed_dim, prototype_num, bias=False)).cuda()
     teacher_prototype_weight.weight_g.data.fill_(1)
     teacher_prototype_weight.weight_g.requires_grad = False
+    # studentから重みをコピーし、勾配の計算を行わないようにする
     teacher_prototype_weight.load_state_dict(student_prototype_weight.module.state_dict())
-    # there is no backpropagation through the teacher, so no need for gradients
     for p in teacher_prototype_weight.parameters():
         p.requires_grad = False
-    #####
 
-    # head_arcface_conf = {'name': 'arcface', 's':30.0, 'm':0.30, 'easy_margin':False, 'warmup':0}
-    head_arcface_conf = {'name': None}  # Do not use arcface for head
+    # --- DINOヘッドの設定 ---
+    head_arcface_conf = {'name': None}  # Arcfaceはheadでは使わない
 
+    # backbone(プロトタイプベクトルは含まない)とDINOヘッドを結合し、DINOヘッドの出力、およびbackboneの出力を返すラッパーを定義
     student = ReturnEmbWrapper(student, DINOHead(
         embed_dim,
         args.out_dim,
@@ -305,7 +354,7 @@ def train_dino(args):
     )
     
     student, teacher = student.cuda(), teacher.cuda()
-    # synchronize batch norms (if any)
+    # BatchNormの同期化（必要な場合のみ）
     if utils.has_batchnorms(student):
         print("convert_sync_batchnorm")
         student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
@@ -325,9 +374,11 @@ def train_dino(args):
         p.requires_grad = False
     print(f"Student and Teacher are built: they are both vit_small network.")
 
-    dino_loss = DINOLoss( #to compute ordinary dino loss
+    # ============ 損失関数・スケジューラ・最適化手法の準備 ============
+    # studentとteacherのヘッドの出力からDINOの損失を計算するクラス
+    dino_loss = DINOLoss(
         args.out_dim,
-        args.local_crops_number + 2,  # total number of crops = 2 global crops + local_crops_number
+        args.local_crops_number + 2,  # total number of crops = local_crops_num + 2global crops
         args.warmup_teacher_temp,
         args.teacher_temp,
         args.warmup_teacher_temp_epochs,
@@ -338,19 +389,23 @@ def train_dino(args):
         unl_pos_weight=unl_pos_weight
     ).cuda()
 
-    temp_schedule = converge_cosine_scheduler(args.prototype_student_temp, args.final_emb_student_temp,
-                                               args.epochs, len(data_loader),
+    # プロトタイプレイヤーで用いるソフトマックス温度パラメータのスケジューラ
+    # base_value=1, final_value=0, epoch=10 warmup_epochs=3なら, 3エポックまで0から1まで線形に増加し、そこからコサイン関数で0に収束する
+    temp_schedule = converge_cosine_scheduler(base_value=args.prototype_student_temp, final_value=args.final_emb_student_temp,
+                                               epochs=args.epochs, niter_per_ep=len(data_loader),
                                                start_warmup_value=args.prototype_student_temp,
                                                warmup_epochs=0,
-                                               converge_epoch= args.epochs//2)
+                                               converge_epoch= args.epochs//2) # これだとすべて0.1固定
     
+    # プロトタイプレイヤーで用いるマージンの設定
+    # 実際のマージンの値は'm'*'warmup'で与えられる
     margin_settings = {'name': 'arcface', 's':30.0, 'm':args.margin, 'easy_margin':False, 
-                        'warmup': [1 if i>=0 else 0 for i in converge_cosine_scheduler(1, 1,
-                                               args.epochs, len(data_loader),
-                                               start_warmup_value=-1,
-                                               warmup_epochs=100,)]}
-    emb_Loss = backbone_emb_Loss( #to compute prototype vector loss
-        prototype_num, 
+                        'warmup': [1 if i>=50*len(data_loader) else 0 for i in range(args.epochs*len(data_loader))] # 50epからmarginを有効にする
+                        }
+    
+    # プロトタイプレイヤーの出力で計算する損失関数
+    prototype_loss = PrototypeLoss(
+        prototype_num, # プロトタイプとして選択するベクトルの数
         args.local_crops_number + 2, 
         args.emb_warmup_teacher_temp,
         args.emb_teacher_temp,
@@ -358,14 +413,14 @@ def train_dino(args):
         args.epochs, 
         args=args,
         logger=logger,
-        student_temp=args.prototype_student_temp,
         unl_pos_weight=unl_pos_weight,
+        # student_temp=args.prototype_student_temp,
         student_temp_schedule = temp_schedule, 
         margin_settings = margin_settings
         ).cuda()
 
-
-    student_prototype_groups = utils.get_params_groups(student_prototype_weight) #to optimize prototype vector
+    # --- オプティマイザの準備 ---
+    student_prototype_groups = utils.get_params_groups(student_prototype_weight)
     params_groups = utils.get_params_groups(student)
     if args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(params_groups)  # to use with ViTs
@@ -381,7 +436,7 @@ def train_dino(args):
     elif args.precision != 'fp32':
         raise ValueError(f"Invalid precision setting: {args.precision}. Choose from 'fp32', 'fp16', or 'bf16'.")
 
-    # ============ init schedulers ... ============
+    # --- スケジューラの準備 ---
     lr_schedule = utils.cosine_scheduler(
         args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 256.,  # linear scaling rule
         float(args.min_lr),
@@ -396,18 +451,13 @@ def train_dino(args):
     # momentum parameter is increased to 1. during training with a cosine schedule
     momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1,
                                                args.epochs, len(data_loader))
-    # lambda parameter is increased and set to 1 after converge_epoch
+    # DINO損失とプロトタイプ損失の合計する際に、プロトタイプ損失に掛ける係数
     lambda_schedule = converge_cosine_scheduler(0, args.lambda_end,
                                                args.epochs, len(data_loader),
                                                converge_epoch= args.lambda_converge)
-    # lambda_schedule = converge_cosine_scheduler(args.lambda_end, args.lambda_end,
-    #                                            args.epochs, len(data_loader),
-    #                                            start_warmup_value=args.lambda_end,
-    #                                            warmup_epochs=args.lambda_converge
-    #                                            )
     print(f"Loss, optimizer and schedulers ready.")
 
-    # ============ optionally resume training ... ============
+    # ============ チェックポイントからの再開 ============
     to_restore = {"epoch": 0}
     utils.restart_from_checkpoint(
         os.path.join(args.output_dir, "checkpoint.pth"),
@@ -420,25 +470,31 @@ def train_dino(args):
     )
     start_epoch = to_restore["epoch"]
 
+    # ============ 学習前の初期化 ============
     best_valid = 1e5
-    pu_normal_prototype_dict = None
-    pu_positive_prototype_dict = None
+    # 正常プロトタイプ
+    normal_prototype_dict = None
+    # 異常プロトタイプ
+    positive_prototype_dict = None
     start_time = time.time()
     print("Starting DINO training !")
-    for epoch in range(start_epoch, args.epochs):
-        # data_loader.sampler.set_epoch(epoch)
 
-        # ============ training one epoch of DINO ... ============
-        train_stats, epoch_valid, pu_normal_prototype_dict, pu_positive_prototype_dict = my_train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
+    # ============ 学習ループ ============
+    for epoch in range(start_epoch, args.epochs):
+        # 1エポック分の学習
+        train_stats, epoch_valid, normal_prototype_dict, positive_prototype_dict = my_train_one_epoch(
+            student, teacher, teacher_without_ddp, dino_loss,
             data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-            epoch, fp16_scaler, args=args, logger=logger, 
+            epoch, fp16_scaler, 
+            args=args, logger=logger, 
             unl_normalize_subset=unl_normalize_subset, pos_normalize_subset=pos_normalize_subset,
             lambda_schedule=lambda_schedule,
-            student_prototype_weight=student_prototype_weight, teacher_prototype_weight=teacher_prototype_weight, s_prototype_optimizer=s_prototype_optimizer, 
-            emb_loss=emb_Loss, test_dataset=test_dataset, val_dataset=val_subset, normal_class=args.normal_class, 
-            pu_normal_prototype_dict=pu_normal_prototype_dict, pu_positive_prototype_dict=pu_positive_prototype_dict)
+            student_prototype_weight=student_prototype_weight, teacher_prototype_weight=teacher_prototype_weight, 
+            s_prototype_optimizer=s_prototype_optimizer, 
+            prototype_loss=prototype_loss, test_dataset=test_dataset, val_dataset=val_subset, normal_class=args.normal_class, 
+            normal_prototype_dict=normal_prototype_dict, positive_prototype_dict=positive_prototype_dict)
 
-        # ============ writing logs ... ============
+        # ============ モデル・ログの保存 ============
         save_dict = {
             'student': student.state_dict(),
             'teacher': teacher.state_dict(),
@@ -462,7 +518,8 @@ def train_dino(args):
             best_valid=epoch_valid
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch}
-        if utils.is_main_process() and (epoch%100 == 0 or epoch==args.epochs-1):#(epoch%10 == 0 or epoch==99):
+        # 100エポックごと、または最終エポックで埋め込み可視化
+        if utils.is_main_process() and (epoch%100 == 0 or epoch==args.epochs-1):
             print("plot embedding")
             plot_embed(teacher_without_ddp, epoch, output_path=args.output_dir, logger=logger, dataset=args.dataset.replace("PU", ""))
             print("save embedding")
@@ -475,7 +532,7 @@ def train_dino(args):
 
 
 def load_config(config_file):
-    with open(config_file, 'r') as file:
+    with open(config_file, 'r', encoding="utf-8") as file:
         config = yaml.safe_load(file)
     return config
 

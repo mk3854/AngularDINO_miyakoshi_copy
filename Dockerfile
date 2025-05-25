@@ -1,7 +1,7 @@
 #
 # NVIDIA NGC コンテナを使う
 # https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch
-# https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-24-05.html
+# https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-24-05.yhtml
 # 動作確認されているので、独自にコンテナをビルドするより手間が少ないです
 #
 FROM nvcr.io/nvidia/pytorch:23.12-py3

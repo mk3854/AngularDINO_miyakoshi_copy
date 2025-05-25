@@ -311,6 +311,9 @@ def reduce_dict(input_dict, average=True):
 
 
 class MetricLogger(object):
+    """
+    指定した間隔でメトリクスをロギングするユーティリティ。
+    """
     def __init__(self, delimiter="\t"):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
@@ -465,7 +468,11 @@ def setup_for_distributed(is_master):
 
 
 def init_distributed_mode(args):
-    # launched with torch.distributed.launch
+    """
+    分散学習の初期化。
+    WindowsやGPUなし環境では分散を無効化。
+    """
+    import platform
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
@@ -485,8 +492,13 @@ def init_distributed_mode(args):
         print('Does not support training without GPU.')
         sys.exit(1)
 
+    if platform.system() == 'Windows':
+        backend = 'gloo'
+    else:
+        backend = 'nccl'
+
     dist.init_process_group(
-        backend="nccl",
+        backend=backend,
         init_method=args.dist_url,
         world_size=args.world_size,
         rank=args.rank,
